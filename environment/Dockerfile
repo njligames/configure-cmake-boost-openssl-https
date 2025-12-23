@@ -1,3 +1,27 @@
-FROM python:3.13-slim-bookworm
+# Use Ubuntu 24.04 as base
+FROM ubuntu:24.04
 
-WORKDIR /app
+# Install build tools, Boost, OpenSSL, and CA certificates
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    libboost-system-dev \
+    libboost-thread-dev \
+    libssl-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy task files
+COPY . /workspace
+
+# Build the project
+RUN mkdir -p build && cd build && cmake .. && make
+
+# Default command to run HTTPS client
+CMD ["./build/https_client"]
