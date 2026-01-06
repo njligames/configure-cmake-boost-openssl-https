@@ -15,13 +15,13 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
-WORKDIR /workspace
+WORKDIR /app
 
 # Copy task files
-COPY . /workspace
+COPY . /app
 
 # Build the project
-RUN mkdir -p build && cd build && cmake .. && make
+RUN mkdir -p build && cd build && cmake .. && make && mv https_client .. && cd .. && rm -rf build
 
 # Default command to run HTTPS client
-CMD ["./build/https_client"]
+# CMD ["./build/https_client"]
