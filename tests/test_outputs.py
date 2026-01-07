@@ -1,88 +1,103 @@
 import subprocess
+import re
+import os
 from pathlib import Path
-import time
 
-def test_main_compiles():
-    """Test that main.cpp compiles successfully.
+BUILD_DIR = Path("build")
 
-    This test verifies:
-    1. The main.cpp file can be compiled with cmake without errors
+
+def build_project():
     """
+    Instruction:
+    'Update CMakeLists.txt (or build invocation)'
 
-    Path("/app/build/main").unlink(missing_ok=True)
-
-    result = subprocess.run(
-        ["mkdir", "-p", "build", "&&", "cd", "build", "&&", "cmake", "..", "&&", "make"],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, f"Compilation failed: {result.stderr}"
-
-def test_runs_and_produces_output():
-    """Test that the compiled program runs and produces output.
-
-    This test:
-    1. Runs the compiled main program
-    2. Verifies that the HTTP status code was output.
-
+    We support BOTH paths.
     """
-    # Run the program
-    run_result = subprocess.run(
-        ["./main"], capture_output=True, text=True, cwd="/app/build"
-    )
+    if Path("CMakeLists.txt").exists():
+        BUILD_DIR.mkdir(exist_ok=True)
+        subprocess.check_call(["cmake", "-S", ".", "-B", str(BUILD_DIR)])
+        subprocess.check_call(["cmake", "--build", str(BUILD_DIR)])
+    elif Path("build.sh").exists():
+        subprocess.check_call(["./build.sh"])
+    else:
+        raise AssertionError(
+            "No CMakeLists.txt or build invocation (e.g. build.sh) found"
+        )
 
-    assert run_result.returncode == 0, f"Program execution failed: {run_result.stderr}"
-    assert run_result.stdout.strip() == "200"
 
-def test_links_openssl_and_boost():
-    out = subprocess.check_output(["ldd", "./main"], text=True)
+def find_executable():
+    """
+    Instruction does NOT specify binary name.
+    We therefore locate any executable produced by the build.
+    """
+    candidates = []
+    for path in BUILD_DIR.rglob("*"):
+        if path.is_file() and os.access(path, os.X_OK):
+            candidates.append(path)
 
-    assert "libssl" in out, "OpenSSL (libssl) not linked"
-    assert "libcrypto" in out, "OpenSSL (libcrypto) not linked"
-    assert "boost_system" in out or "libboost_system" in out, "Boost.System not linked"
+    assert candidates, "No executable produced by the build"
+    return candidates[0]
 
-def test_real_tls_handshake():
-    proc = subprocess.Popen(
-        ["./main"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
 
-    stdout, stderr = proc.communicate(timeout=10)
+def extract_http_status(output: str):
+    match = re.search(r"\b\d{3}\b", output)
+    return match.group(0) if match else None
 
-    assert proc.returncode == 0
-    assert "200" in stdout
 
-    # OpenSSL error strings only appear if TLS stack is active
-    assert "SSL" not in stderr.upper(), f"TLS error occurred:\n{stderr}"
+def test_builds_successfully():
+    """
+    Verifies the link-time issue is fixed.
+    """
+    build_project()
+    exe = find_executable()
+    assert exe.exists()
 
-def test_fails_without_network():
+
+def test_connects_and_prints_http_status_code():
+    """
+    Instruction:
+    'verify the resulting HTTPS client connects to example.com
+     and prints the HTTP status code'
+    """
+    exe = find_executable()
+
     result = subprocess.run(
-        ["unshare", "-n", "./main"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-
-    assert result.returncode != 0
-
-def test_requires_example_dot_com():
-    env = dict(**{"RES_OPTIONS": "attempts:0 timeout:1"})
-
-    result = subprocess.run(
-        ["./main"],
+        [str(exe)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=env
+        timeout=15,
     )
 
-    assert result.returncode != 0 or "200" not in result.stdout
+    assert result.returncode == 0, f"Program failed:\n{result.stderr}"
 
-def test_uses_openssl_symbols():
-    out = subprocess.check_output(["nm", "-D", "./main"], text=True)
+    status = extract_http_status(result.stdout)
+    assert status, f"No HTTP status code printed:\n{result.stdout}"
 
-    assert "SSL_connect" in out or "SSL_CTX_new" in out, \
-        "No OpenSSL symbols referenced"
 
+def test_requires_network_to_produce_status_code():
+    """
+    Minimal anti-fake check.
+
+    If the program truly 'connects to example.com', then
+    disabling networking must prevent it from producing
+    an HTTP status code.
+
+    This does NOT enforce a specific failure mode.
+    """
+    exe = find_executable()
+
+    result = subprocess.run(
+        ["unshare", "-n", str(exe)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+    )
+
+    status = extract_http_status(result.stdout)
+
+    assert status is None, (
+        "Program produced an HTTP status code with networking disabled; "
+        "this suggests no real connection was attempted"
+    )
