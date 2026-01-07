@@ -57,7 +57,7 @@ int main() {
 
         response_stream >> http_version >> status_code;
 
-        std::cout << "HTTP status code: " << status_code << std::endl;
+        std::cout << status_code << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
@@ -71,7 +71,7 @@ EOF
 
 cat <<'EOF' > CMakeLists.txt
 cmake_minimum_required(VERSION 3.16)
-project(https_client LANGUAGES CXX)
+project(main LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -82,15 +82,15 @@ find_package(Boost REQUIRED COMPONENTS system)
 # OpenSSL (required for TLS)
 find_package(OpenSSL REQUIRED)
 
-add_executable(https_client
+add_executable(main
     main.cpp
 )
 
-target_include_directories(https_client PRIVATE
+target_include_directories(main PRIVATE
     ${Boost_INCLUDE_DIRS}
 )
 
-target_link_libraries(https_client PRIVATE
+target_link_libraries(main PRIVATE
     Boost::system
     OpenSSL::SSL
     OpenSSL::Crypto

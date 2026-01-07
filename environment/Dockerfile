@@ -7,7 +7,6 @@ RUN apt-get update && apt-get install -y \
     cmake \
     git \
     wget \
-    curl \
     libboost-system-dev \
     libboost-thread-dev \
     libssl-dev \
