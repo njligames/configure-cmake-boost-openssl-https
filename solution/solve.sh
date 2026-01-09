@@ -1,98 +1,134 @@
 cat <<'EOF' > main.cpp
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
-#include <boost/asio/ssl/host_name_verification.hpp>
 #include <openssl/ssl.h>
+
 #include <iostream>
 #include <string>
+#include <cstdlib>
 
-using boost::asio::ip::tcp;
+namespace asio = boost::asio;
+using tcp = asio::ip::tcp;
+
+static void fail(const std::string& where, const std::string& message) {
+    std::cerr << "[ERROR] " << where << ": " << message << std::endl;
+}
 
 int main() {
     try {
-        boost::asio::io_context io;
-        boost::asio::ssl::context ctx(boost::asio::ssl::context::tls_client);
+        asio::io_context io;
 
-        ctx.set_default_verify_paths();
-        ctx.set_options(
-            boost::asio::ssl::context::default_workarounds |
-            boost::asio::ssl::context::no_sslv2 |
-            boost::asio::ssl::context::no_sslv3 |
-            boost::asio::ssl::context::no_tlsv1 |
-            boost::asio::ssl::context::no_tlsv1_1
-        );
+        // ---- SSL context ----
+        asio::ssl::context ctx(asio::ssl::context::tls_client);
 
-        boost::asio::ssl::stream<tcp::socket> socket(io, ctx);
-
-        // REQUIRED: certificate + hostname verification
-        socket.set_verify_mode(boost::asio::ssl::verify_peer);
-        socket.set_verify_callback(
-            boost::asio::ssl::host_name_verification("example.com")
-        );
-
-        // REQUIRED: set SNI (this is what was missing)
-        if (!SSL_set_tlsext_host_name(socket.native_handle(), "example.com")) {
-            throw std::runtime_error("Failed to set SNI hostname");
+        boost::system::error_code ec;
+        ctx.set_default_verify_paths(ec);
+        if (ec) {
+            fail("SSL context", "failed to load default verify paths: " + ec.message());
+            return EXIT_FAILURE;
         }
 
+        ctx.set_verify_mode(asio::ssl::verify_peer);
+
+        asio::ssl::stream<tcp::socket> socket(io, ctx);
+
+        // ---- DNS resolution ----
         tcp::resolver resolver(io);
-        auto endpoints = resolver.resolve("example.com", "443");
-        boost::asio::connect(socket.lowest_layer(), endpoints);
+        auto endpoints = resolver.resolve("example.com", "443", ec);
+        if (ec || endpoints.empty()) {
+            fail("DNS resolution", ec ? ec.message() : "no endpoints returned");
+            return EXIT_FAILURE;
+        }
 
-        socket.handshake(boost::asio::ssl::stream_base::client);
+        // ---- TCP connect ----
+        asio::connect(socket.lowest_layer(), endpoints, ec);
+        if (ec) {
+            fail("TCP connect", ec.message());
+            return EXIT_FAILURE;
+        }
 
-        std::string request =
+        // ---- SNI (MANDATORY) ----
+        if (!SSL_set_tlsext_host_name(socket.native_handle(), "example.com")) {
+            fail("TLS setup", "failed to set SNI hostname");
+            return EXIT_FAILURE;
+        }
+
+        // ---- TLS handshake ----
+        socket.handshake(asio::ssl::stream_base::client, ec);
+        if (ec) {
+            fail("TLS handshake", ec.message());
+            return EXIT_FAILURE;
+        }
+
+        // ---- HTTP request ----
+        const std::string request =
             "GET / HTTP/1.1\r\n"
             "Host: example.com\r\n"
             "Connection: close\r\n\r\n";
 
-        boost::asio::write(socket, boost::asio::buffer(request));
+        asio::write(socket, asio::buffer(request), ec);
+        if (ec) {
+            fail("HTTP write", ec.message());
+            return EXIT_FAILURE;
+        }
 
-        boost::asio::streambuf response;
-        boost::asio::read_until(socket, response, "\r\n");
+        // ---- Read HTTP status line ----
+        asio::streambuf response;
+        asio::read_until(socket, response, "\r\n", ec);
+        if (ec) {
+            fail("HTTP read", ec.message());
+            return EXIT_FAILURE;
+        }
 
         std::istream response_stream(&response);
+
         std::string http_version;
-        unsigned int status_code;
+        unsigned int status_code = 0;
 
         response_stream >> http_version >> status_code;
 
-        std::cout << status_code << std::endl;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
+        if (!response_stream || http_version.rfind("HTTP/", 0) != 0) {
+            fail("HTTP parse", "invalid HTTP status line");
+            return EXIT_FAILURE;
+        }
 
-    return 0;
+        if (status_code < 100 || status_code > 599) {
+            fail("HTTP parse", "invalid HTTP status code");
+            return EXIT_FAILURE;
+        }
+
+        // ---- Success ----
+        std::cout << status_code << std::endl;
+        return EXIT_SUCCESS;
+
+    } catch (const std::exception& e) {
+        fail("Unhandled exception", e.what());
+        return EXIT_FAILURE;
+    } catch (...) {
+        fail("Unhandled exception", "unknown error");
+        return EXIT_FAILURE;
+    }
 }
 
 EOF
 
 cat <<'EOF' > CMakeLists.txt
 cmake_minimum_required(VERSION 3.16)
-project(main LANGUAGES CXX)
+project(https_client LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Boost (Asio depends on boost::system)
 find_package(Boost REQUIRED COMPONENTS system)
-
-# OpenSSL (required for TLS)
 find_package(OpenSSL REQUIRED)
 
-add_executable(main
-    main.cpp
+add_executable(main main.cpp)
+
+target_link_libraries(main
+    PRIVATE
+        Boost::system
+        OpenSSL::SSL
+        OpenSSL::Crypto
 )
 
-target_include_directories(main PRIVATE
-    ${Boost_INCLUDE_DIRS}
-)
-
-target_link_libraries(main PRIVATE
-    Boost::system
-    OpenSSL::SSL
-    OpenSSL::Crypto
-)
 EOF
